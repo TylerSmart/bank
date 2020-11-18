@@ -2,6 +2,7 @@ const cluster = require('cluster');
 const numCPUs = require('os').cpus().length;
 const fs = require('fs');
 const bcrypt = require('bcrypt');
+const cliProgress = require('cli-progress');
 
 if (cluster.isMaster) {
 	const commonPasswords = require('./common-passwords.json');
@@ -11,7 +12,7 @@ if (cluster.isMaster) {
 	let end;
 
 	const hashes = fs
-		.readFileSync('./test.hash', 'utf-8')
+		.readFileSync('./bank.hash', 'utf-8')
 		.split('\n')
 		.map((pw) => pw.trim()); // Because Windows sucks sometimes and puts an \r for us to enjoy
 
@@ -36,7 +37,7 @@ if (cluster.isMaster) {
 			shortPasswords.push(pw);
 		}
 		end = new Date();
-		console.log(`Elapsed Time: ${end - start} ms to get ${shortPasswords.length} short passwords`);
+		console.log(`Elapsed Time: ${end - start} ms to get ${shortPasswords.length} short passwords\n\n`);
 	}
 
 	let passwords = [];
@@ -49,39 +50,56 @@ if (cluster.isMaster) {
 
 	count = 0;
 	start = new Date();
+
+	const multibar = new cliProgress.MultiBar(
+		{
+			clearOnComplete: false,
+			hideCursor: true,
+		},
+		cliProgress.Presets.shades_classic
+	);
+
 	for (let i = 0; i < numCPUs; i++) {
 		const worker = cluster.fork();
-		let msg;
+
+		let childHashes;
 
 		if (i == numCPUs - 1) {
-			msg = { childHashes: hashes, CPU: i + 1, passwords };
+			childHashes = hashes;
 		} else {
-			msg = { childHashes: hashes.splice(0, splitQty), CPU: i + 1, passwords };
+			childHashes = hashes.splice(0, splitQty);
 		}
+		let bar = multibar.create(childHashes.length, 0);
+		let msg = { childHashes, CPU: i + 1, passwords };
+
 		worker.send(msg);
 		worker.on('exit', () => {
 			count++;
 
-			if (count == numCPUs - 8) {
+			if (count == numCPUs) {
 				end = new Date();
 				console.log(`Elapsed Time: ${end - start}ms to decrypt ${passwords.length} passwords`);
 			}
+		});
+
+		worker.on('message', (msg) => {
+			bar.increment();
 		});
 	}
 } else {
 	//worker
 	process.on('message', ({ childHashes, CPU, passwords }) => {
-		console.log(`Handling ${childHashes.length} hashes`);
-		console.log(`Handling ${passwords.length} passwords`);
-
 		for (let [hashIndex, hash] of childHashes.entries()) {
+			let found = false;
 			for (let [i, pw] of passwords.entries()) {
 				if (bcrypt.compareSync(pw, hash)) {
-					// console.log(`${pw} [${hash}]`);
+					found = true;
 					passwords.splice(i, 1);
+
 					fs.appendFileSync('cracked-passwords-processes.txt', `${hash} ${pw}\n`);
-					break;
+					process.send('Found one');
 				}
+				if (found) break;
 			}
 		}
 		process.exit();

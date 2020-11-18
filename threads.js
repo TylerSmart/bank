@@ -2,6 +2,7 @@ const { Worker, isMainThread, parentPort } = require('worker_threads');
 const numCPUs = require('os').cpus().length;
 const fs = require('fs');
 const bcrypt = require('bcrypt');
+const cliProgress = require('cli-progress');
 
 if (isMainThread) {
 	const commonPasswords = require('./common-passwords.json');
@@ -36,23 +37,42 @@ if (isMainThread) {
 			shortPasswords.push(pw);
 		}
 		end = new Date();
-		console.log(`Elapsed Time: ${end - start} ms to get ${shortPasswords.length} short passwords`);
+		console.log(`Elapsed Time: ${end - start} ms to get ${shortPasswords.length} short passwords\n\n`);
 	}
+
+	let passwords = [];
+
+	const splitQty = hashes.length / numCPUs;
+
 	getShortPasswords();
+
+	passwords = [...commonPasswords, ...shortPasswords];
 	// Main Thread
-	const splitQty = qty / numCPUs;
 
 	count = 0;
 	start = new Date();
+
+	const multibar = new cliProgress.MultiBar(
+		{
+			clearOnComplete: false,
+			hideCursor: true,
+		},
+		cliProgress.Presets.shades_classic
+	);
+
 	for (let i = 0; i < numCPUs; i++) {
 		const worker = new Worker(__filename);
-		let msg;
+
+		let childHashes;
 
 		if (i == numCPUs - 1) {
-			msg = { childHashes: hashes, CPU: i + 1, passwords };
+			childHashes = hashes;
 		} else {
-			msg = { childHashes: hashes.splice(0, splitQty), CPU: i + 1, passwords };
+			childHashes = hashes.splice(0, splitQty);
 		}
+		let bar = multibar.create(childHashes.length, 0);
+		let msg = { childHashes, CPU: i + 1, passwords };
+
 		worker.postMessage(msg);
 		worker.on('exit', () => {
 			count++;
@@ -69,11 +89,14 @@ if (isMainThread) {
 		console.log(`Worker ${id}: I have work to do from ${start} to ${end}`);
 
 		for (let [hashIndex, hash] of childHashes.entries()) {
+			let found = false;
 			for (let [i, pw] of passwords.entries()) {
 				if (bcrypt.compareSync(pw, hash)) {
-					// console.log(`${pw} [${hash}]`);
+					found = true;
 					// passwords.splice(i, 1);
+
 					fs.appendFileSync('cracked-passwords-threads.txt', `${hash} ${pw}\n`);
+					parentPort.postMessage('Found one');
 					break;
 				}
 			}

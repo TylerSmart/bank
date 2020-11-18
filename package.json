@@ -9,6 +9,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "bcrypt": "^5.0.0"
+    "bcrypt": "^5.0.0",
+    "cli-progress": "^3.8.2"
   }
 }
