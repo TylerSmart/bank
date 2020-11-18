@@ -1,0 +1,5 @@
+/node_modules
+cracked-passwords-normal.txt
+cracked-passwords-processes.txt
+cracked-passwords-threads.txt
+test.hash
