@@ -1,107 +1,142 @@
-const cluster = require('cluster');
-const numCPUs = require('os').cpus().length;
-const fs = require('fs');
-const bcrypt = require('bcrypt');
-const cliProgress = require('cli-progress');
+const cluster = require("cluster");
+const numCPUs = require("os").cpus().length;
+
+const fs = require("fs");
+const bcrypt = require("bcrypt");
+const cliProgress = require("cli-progress");
+
+const commonPasswords = require("./common-passwords.json");
+const shortPasswords = [];
+
+let start;
+let end;
+
+const hashes = fs
+    .readFileSync("./bank.hash", "utf-8")
+    .split("\n")
+    .map((pw) => pw.trim()); // Because Windows sucks sometimes and puts an \r for us to enjoy
 
 if (cluster.isMaster) {
-	const commonPasswords = require('./common-passwords.json');
-	const shortPasswords = [];
+    function getShortPasswords() {
+        console.log("Generating short passwords...");
+        const charSet =
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        function* pws(n) {
+            if (n == 1) yield* charSet;
+            else
+                for (let a of pws(n - 1)) {
+                    for (let b of charSet) {
+                        yield `${a}${b}`;
+                    }
+                }
+        }
+        function* pwsUpTo(n) {
+            for (let i = 1; i <= n; i++) {
+                yield* pws(i);
+            }
+        }
+        start = new Date();
+        for (let pw of pwsUpTo(4)) {
+            shortPasswords.push(pw);
+        }
+        end = new Date();
+        console.log(`Elapsed Time: ${end - start}ms`);
+    }
 
-	let start;
-	let end;
+    getShortPasswords();
+    const passwords = [...commonPasswords, ...shortPasswords];
+    const multibar = new cliProgress.MultiBar(
+        {
+            clearOnComplete: false,
+            hideCursor: true,
+        },
+        cliProgress.Presets.shades_grey
+    );
+    const hashBarTotal = multibar.create(hashes.length, 0);
 
-	const hashes = fs
-		.readFileSync('./bank.hash', 'utf-8')
-		.split('\n')
-		.map((pw) => pw.trim()); // Because Windows sucks sometimes and puts an \r for us to enjoy
+    const splitQty = hashes.length / numCPUs;
 
-	function getShortPasswords() {
-		const charSet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-		function* pws(n) {
-			if (n == 1) yield* charSet;
-			else
-				for (let a of pws(n - 1)) {
-					for (let b of charSet) {
-						yield `${a}${b}`;
-					}
-				}
-		}
-		function* pwsUpTo(n) {
-			for (let i = 1; i <= n; i++) {
-				yield* pws(i);
-			}
-		}
-		start = new Date();
-		for (let pw of pwsUpTo(4)) {
-			shortPasswords.push(pw);
-		}
-		end = new Date();
-		console.log(`Elapsed Time: ${end - start} ms to get ${shortPasswords.length} short passwords\n\n`);
-	}
+    console.log("\nDecrpyting hashes...");
+    start = new Date();
 
-	let passwords = [];
+    completedCount = 0;
 
-	const splitQty = hashes.length / numCPUs;
+    for (let i = 0; i < numCPUs; i++) {
+        const worker = cluster.fork();
+        let childHashes;
 
-	getShortPasswords();
+        if (i == numCPUs - 1) {
+            childHashes = hashes;
+        } else {
+            childHashes = hashes.splice(0, splitQty);
+        }
 
-	passwords = [...commonPasswords, ...shortPasswords];
+        const hashBarWorker = multibar.create(childHashes.length, 0);
 
-	count = 0;
-	start = new Date();
+        worker.send({ passwords, hashes: childHashes, bar, hashBar });
 
-	const multibar = new cliProgress.MultiBar(
-		{
-			clearOnComplete: false,
-			hideCursor: true,
-		},
-		cliProgress.Presets.shades_classic
-	);
+        worker.on("message", (text) => {
+            hashBarWorker.increment();
+            hashBarTotal.increment();
+            fs.appendFile("cracked-passwords-normal.txt", text, () => {});
+        });
 
-	for (let i = 0; i < numCPUs; i++) {
-		const worker = cluster.fork();
+        worker.on("exit", () => {
+            completedCount++;
 
-		let childHashes;
-
-		if (i == numCPUs - 1) {
-			childHashes = hashes;
-		} else {
-			childHashes = hashes.splice(0, splitQty);
-		}
-		let bar = multibar.create(childHashes.length, 0);
-		let msg = { childHashes, CPU: i + 1, passwords };
-
-		worker.send(msg);
-		worker.on('exit', () => {
-			count++;
-
-			if (count == numCPUs) {
-				end = new Date();
-				console.log(`Elapsed Time: ${end - start}ms to decrypt ${passwords.length} passwords`);
-			}
-		});
-
-		worker.on('message', (msg) => {
-			bar.increment();
-		});
-	}
+            if (completedCount == numCPUs) {
+                end = new Date();
+                console.log(`Elapsed Time: ${end - start}ms`);
+            }
+        });
+    }
 } else {
-	//worker
-	process.on('message', ({ childHashes, CPU, passwords }) => {
-		for (let [hashIndex, hash] of childHashes.entries()) {
-			let found = false;
-			for (let [i, pw] of passwords.entries()) {
-				if (bcrypt.compareSync(pw, hash)) {
-					found = true;
-					passwords.splice(i, 1);
+    //worker
+    process.on("message", async ({ passwords, hashes }) => {
+        function* getCompare(hash) {
+            passwordBar.update(0);
+            for (let password of passwords) {
+                passwordBar.increment();
+                // console.log(`Testing ${password}`);
+                yield new Promise((res, rej) => {
+                    bcrypt.compare(password, hash, (err, same) => {
+                        res({ same, password });
+                    });
+                });
+            }
+        }
 
-					fs.appendFileSync('cracked-passwords-processes.txt', `${hash} ${pw}\n`);
-					process.send('Found one');
-				}
-				if (found) break;
-			}
-		}
-		process.exit();
-	});
+        function findPlaintext(pwGetterObj, hash, foundObj) {
+            return new Promise(async (res, rej) => {
+                const { passwordGetter } = pwGetterObj;
+
+                let result = passwordGetter.next();
+                do {
+                    const { same, password } = await result.value;
+
+                    if (same) {
+                        foundObj.found = true;
+                        hashBar.increment();
+                        res({ hash, password });
+                        break;
+                    }
+                    result = passwordGetter.next();
+                } while (!result.done && !foundObj.found);
+
+                rej();
+            });
+        }
+
+        for (let hash of hashes) {
+            let passwordGetter = getCompare(hash);
+            let foundObj = { found: false };
+            await findPlaintext({ passwordGetter }, hash, foundObj).then(
+                (res) => {
+                    process.send(`${res.hash} ${res.password}`);
+                }
+            );
+        }
+
+        process.exit();
+    });
 }
